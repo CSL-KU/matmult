@@ -7,7 +7,7 @@ This project is useful for studying how loop ordering, cache behavior, transposi
 ## Features
 
 - Single-binary benchmark (`matrix`) with selectable algorithm variants
-- Configurable square matrix size (`-n`)
+- Configurable matrix shape for `(n,m) x (m,n)` multiplication (`-n`, `-m`)
 - Deterministic random initialization (fixed seed) for reproducible checksums
 - Simple timing output suitable for scripting
 - Includes a helper evaluation script (`eval.sh`) for size sweeps
@@ -47,10 +47,11 @@ make clean
 ## Usage
 
 ```bash
-./matrix [-n dimension] [-a algorithm]
+./matrix [-n n] [-m m] [-a algorithm]
 ```
 
-- `-n`: square matrix dimension (default: `1024`)
+- `-n`: A rows / B cols (default: `1024`)
+- `-m`: shared dimension, A cols / B rows (default: `1024`)
 - `-a`: algorithm selector
 
 Algorithm IDs:
@@ -70,10 +71,10 @@ Show help:
 
 ## Example
 
-Run all variants for a 256x256 matrix:
+Run all variants for `(n,m) = (256,128)`:
 
 ```bash
-./matrix -n 256 -a 99
+./matrix -n 256 -m 128 -a 99
 ```
 
 Typical output format:
@@ -108,8 +109,8 @@ Example:
 
 Output columns:
 
-- `n`: matrix dimension
-- `ws`: approximate matrix working-set size in KiB (`n*n*4*3/1024`)
+- `n`: shared dimension, A cols / B rows (fixed if provided; otherwise `m=n`)
+- `ws_kib`: approximate working-set size in KiB (`(n*m + m*n + n*n)*4/1024`)
 - `dur`: measured duration in seconds
 
 ## Notes On Correctness And Comparisons
