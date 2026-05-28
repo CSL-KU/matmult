@@ -252,30 +252,120 @@ void matmult_opt4_transposed_simd(int8_t* A, int8_t* B, int32_t* C, int dimensio
         return;
     }
     transpose_naive(B, Bt, dimension, dimension);
+    // Process 4 columns of Bt at a time to amortize loads and conversions
+    int j, i;
+    for (i = 0; i < dimension; i++) {
+        for (j = 0; j <= dimension - 4; j += 4) {
+            int32x4_t acc0 = vdupq_n_s32(0);
+            int32x4_t acc1 = vdupq_n_s32(0);
+            int32x4_t acc2 = vdupq_n_s32(0);
+            int32x4_t acc3 = vdupq_n_s32(0);
 
-    for (int i = 0; i < dimension; i++) {
-        for (int j = 0; j < dimension; j++) {
-            int64_t acc = 0;
             int k = 0;
             for (; k <= dimension - 16; k += 16) {
                 int8x16_t a_vec = vld1q_s8(A + i * dimension + k);
-                int8x16_t b_vec = vld1q_s8(Bt + j * dimension + k);
 
                 int16x8_t a_lo = vmovl_s8(vget_low_s8(a_vec));
                 int16x8_t a_hi = vmovl_s8(vget_high_s8(a_vec));
-                int16x8_t b_lo = vmovl_s8(vget_low_s8(b_vec));
-                int16x8_t b_hi = vmovl_s8(vget_high_s8(b_vec));
 
                 int32x4_t a0 = vmovl_s16(vget_low_s16(a_lo));
                 int32x4_t a1 = vmovl_s16(vget_high_s16(a_lo));
                 int32x4_t a2 = vmovl_s16(vget_low_s16(a_hi));
                 int32x4_t a3 = vmovl_s16(vget_high_s16(a_hi));
 
+                // column 0
+                int8x16_t b0_vec = vld1q_s8(Bt + (j + 0) * dimension + k);
+                int16x8_t b0_lo = vmovl_s8(vget_low_s8(b0_vec));
+                int16x8_t b0_hi = vmovl_s8(vget_high_s8(b0_vec));
+                int32x4_t b0_0 = vmovl_s16(vget_low_s16(b0_lo));
+                int32x4_t b0_1 = vmovl_s16(vget_high_s16(b0_lo));
+                int32x4_t b0_2 = vmovl_s16(vget_low_s16(b0_hi));
+                int32x4_t b0_3 = vmovl_s16(vget_high_s16(b0_hi));
+                acc0 = vaddq_s32(acc0, vmulq_s32(a0, b0_0));
+                acc0 = vaddq_s32(acc0, vmulq_s32(a1, b0_1));
+                acc0 = vaddq_s32(acc0, vmulq_s32(a2, b0_2));
+                acc0 = vaddq_s32(acc0, vmulq_s32(a3, b0_3));
+
+                // column 1
+                int8x16_t b1_vec = vld1q_s8(Bt + (j + 1) * dimension + k);
+                int16x8_t b1_lo = vmovl_s8(vget_low_s8(b1_vec));
+                int16x8_t b1_hi = vmovl_s8(vget_high_s8(b1_vec));
+                int32x4_t b1_0 = vmovl_s16(vget_low_s16(b1_lo));
+                int32x4_t b1_1 = vmovl_s16(vget_high_s16(b1_lo));
+                int32x4_t b1_2 = vmovl_s16(vget_low_s16(b1_hi));
+                int32x4_t b1_3 = vmovl_s16(vget_high_s16(b1_hi));
+                acc1 = vaddq_s32(acc1, vmulq_s32(a0, b1_0));
+                acc1 = vaddq_s32(acc1, vmulq_s32(a1, b1_1));
+                acc1 = vaddq_s32(acc1, vmulq_s32(a2, b1_2));
+                acc1 = vaddq_s32(acc1, vmulq_s32(a3, b1_3));
+
+                // column 2
+                int8x16_t b2_vec = vld1q_s8(Bt + (j + 2) * dimension + k);
+                int16x8_t b2_lo = vmovl_s8(vget_low_s8(b2_vec));
+                int16x8_t b2_hi = vmovl_s8(vget_high_s8(b2_vec));
+                int32x4_t b2_0 = vmovl_s16(vget_low_s16(b2_lo));
+                int32x4_t b2_1 = vmovl_s16(vget_high_s16(b2_lo));
+                int32x4_t b2_2 = vmovl_s16(vget_low_s16(b2_hi));
+                int32x4_t b2_3 = vmovl_s16(vget_high_s16(b2_hi));
+                acc2 = vaddq_s32(acc2, vmulq_s32(a0, b2_0));
+                acc2 = vaddq_s32(acc2, vmulq_s32(a1, b2_1));
+                acc2 = vaddq_s32(acc2, vmulq_s32(a2, b2_2));
+                acc2 = vaddq_s32(acc2, vmulq_s32(a3, b2_3));
+
+                // column 3
+                int8x16_t b3_vec = vld1q_s8(Bt + (j + 3) * dimension + k);
+                int16x8_t b3_lo = vmovl_s8(vget_low_s8(b3_vec));
+                int16x8_t b3_hi = vmovl_s8(vget_high_s8(b3_vec));
+                int32x4_t b3_0 = vmovl_s16(vget_low_s16(b3_lo));
+                int32x4_t b3_1 = vmovl_s16(vget_high_s16(b3_lo));
+                int32x4_t b3_2 = vmovl_s16(vget_low_s16(b3_hi));
+                int32x4_t b3_3 = vmovl_s16(vget_high_s16(b3_hi));
+                acc3 = vaddq_s32(acc3, vmulq_s32(a0, b3_0));
+                acc3 = vaddq_s32(acc3, vmulq_s32(a1, b3_1));
+                acc3 = vaddq_s32(acc3, vmulq_s32(a2, b3_2));
+                acc3 = vaddq_s32(acc3, vmulq_s32(a3, b3_3));
+            }
+
+            // horizontal reduce vector accumulators
+            int64_t sum0 = (int64_t)vaddvq_s32(acc0);
+            int64_t sum1 = (int64_t)vaddvq_s32(acc1);
+            int64_t sum2 = (int64_t)vaddvq_s32(acc2);
+            int64_t sum3 = (int64_t)vaddvq_s32(acc3);
+
+            // handle remaining k
+            for (; k < dimension; k++) {
+                int32_t a = (int32_t)A[i * dimension + k];
+                sum0 += a * (int32_t)Bt[(j + 0) * dimension + k];
+                sum1 += a * (int32_t)Bt[(j + 1) * dimension + k];
+                sum2 += a * (int32_t)Bt[(j + 2) * dimension + k];
+                sum3 += a * (int32_t)Bt[(j + 3) * dimension + k];
+            }
+
+            C[i * dimension + (j + 0)] = (int32_t)sum0;
+            C[i * dimension + (j + 1)] = (int32_t)sum1;
+            C[i * dimension + (j + 2)] = (int32_t)sum2;
+            C[i * dimension + (j + 3)] = (int32_t)sum3;
+        }
+
+        // handle remaining columns
+        for (; j < dimension; j++) {
+            int64_t acc = 0;
+            int k = 0;
+            for (; k <= dimension - 16; k += 16) {
+                int8x16_t a_vec = vld1q_s8(A + i * dimension + k);
+                int8x16_t b_vec = vld1q_s8(Bt + j * dimension + k);
+                int16x8_t a_lo = vmovl_s8(vget_low_s8(a_vec));
+                int16x8_t a_hi = vmovl_s8(vget_high_s8(a_vec));
+                int16x8_t b_lo = vmovl_s8(vget_low_s8(b_vec));
+                int16x8_t b_hi = vmovl_s8(vget_high_s8(b_vec));
+                int32x4_t a0 = vmovl_s16(vget_low_s16(a_lo));
+                int32x4_t a1 = vmovl_s16(vget_high_s16(a_lo));
+                int32x4_t a2 = vmovl_s16(vget_low_s16(a_hi));
+                int32x4_t a3 = vmovl_s16(vget_high_s16(a_hi));
                 int32x4_t b0 = vmovl_s16(vget_low_s16(b_lo));
                 int32x4_t b1 = vmovl_s16(vget_high_s16(b_lo));
                 int32x4_t b2 = vmovl_s16(vget_low_s16(b_hi));
                 int32x4_t b3 = vmovl_s16(vget_high_s16(b_hi));
-
                 int32x4_t m0 = vmulq_s32(a0, b0);
                 int32x4_t m1 = vmulq_s32(a1, b1);
                 int32x4_t m2 = vmulq_s32(a2, b2);
