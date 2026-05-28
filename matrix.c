@@ -146,10 +146,54 @@ void matmult_opt4_transposed_simd(int8_t* A, int8_t* B, int32_t* C, int dimensio
     transpose_naive(B, Bt, dimension, dimension);
 
 #if defined(__ARM_FEATURE_DOTPROD)
-    // Use vdot when available
+    // Use vdot when available — 8-column blocked implementation
     for (int i = 0; i < dimension; i++) {
         int j;
-        for (j = 0; j <= dimension - 4; j += 4) {
+        for (j = 0; j <= dimension - 8; j += 8) {
+            int32x4_t acc0 = vdupq_n_s32(0), acc1 = vdupq_n_s32(0), acc2 = vdupq_n_s32(0), acc3 = vdupq_n_s32(0);
+            int32x4_t acc4 = vdupq_n_s32(0), acc5 = vdupq_n_s32(0), acc6 = vdupq_n_s32(0), acc7 = vdupq_n_s32(0);
+            int k;
+            for (k = 0; k <= dimension - 16; k += 16) {
+                int8x16_t a_vec = vld1q_s8(A + i * dimension + k);
+                int8x16_t b0_vec = vld1q_s8(Bt + (j + 0) * dimension + k);
+                int8x16_t b1_vec = vld1q_s8(Bt + (j + 1) * dimension + k);
+                int8x16_t b2_vec = vld1q_s8(Bt + (j + 2) * dimension + k);
+                int8x16_t b3_vec = vld1q_s8(Bt + (j + 3) * dimension + k);
+                int8x16_t b4_vec = vld1q_s8(Bt + (j + 4) * dimension + k);
+                int8x16_t b5_vec = vld1q_s8(Bt + (j + 5) * dimension + k);
+                int8x16_t b6_vec = vld1q_s8(Bt + (j + 6) * dimension + k);
+                int8x16_t b7_vec = vld1q_s8(Bt + (j + 7) * dimension + k);
+                acc0 = vdotq_s32(acc0, a_vec, b0_vec);
+                acc1 = vdotq_s32(acc1, a_vec, b1_vec);
+                acc2 = vdotq_s32(acc2, a_vec, b2_vec);
+                acc3 = vdotq_s32(acc3, a_vec, b3_vec);
+                acc4 = vdotq_s32(acc4, a_vec, b4_vec);
+                acc5 = vdotq_s32(acc5, a_vec, b5_vec);
+                acc6 = vdotq_s32(acc6, a_vec, b6_vec);
+                acc7 = vdotq_s32(acc7, a_vec, b7_vec);
+            }
+            int64_t sum0 = (int64_t)vaddvq_s32(acc0); int64_t sum1 = (int64_t)vaddvq_s32(acc1);
+            int64_t sum2 = (int64_t)vaddvq_s32(acc2); int64_t sum3 = (int64_t)vaddvq_s32(acc3);
+            int64_t sum4 = (int64_t)vaddvq_s32(acc4); int64_t sum5 = (int64_t)vaddvq_s32(acc5);
+            int64_t sum6 = (int64_t)vaddvq_s32(acc6); int64_t sum7 = (int64_t)vaddvq_s32(acc7);
+            for (; k < dimension; k++) {
+                int32_t a = (int32_t)A[i * dimension + k];
+                sum0 += a * (int32_t)Bt[(j + 0) * dimension + k];
+                sum1 += a * (int32_t)Bt[(j + 1) * dimension + k];
+                sum2 += a * (int32_t)Bt[(j + 2) * dimension + k];
+                sum3 += a * (int32_t)Bt[(j + 3) * dimension + k];
+                sum4 += a * (int32_t)Bt[(j + 4) * dimension + k];
+                sum5 += a * (int32_t)Bt[(j + 5) * dimension + k];
+                sum6 += a * (int32_t)Bt[(j + 6) * dimension + k];
+                sum7 += a * (int32_t)Bt[(j + 7) * dimension + k];
+            }
+            C[i * dimension + (j + 0)] = (int32_t)sum0; C[i * dimension + (j + 1)] = (int32_t)sum1;
+            C[i * dimension + (j + 2)] = (int32_t)sum2; C[i * dimension + (j + 3)] = (int32_t)sum3;
+            C[i * dimension + (j + 4)] = (int32_t)sum4; C[i * dimension + (j + 5)] = (int32_t)sum5;
+            C[i * dimension + (j + 6)] = (int32_t)sum6; C[i * dimension + (j + 7)] = (int32_t)sum7;
+        }
+        // handle remaining 4-column blocks
+        for (; j <= dimension - 4; j += 4) {
             int32x4_t acc0 = vdupq_n_s32(0), acc1 = vdupq_n_s32(0), acc2 = vdupq_n_s32(0), acc3 = vdupq_n_s32(0);
             int k;
             for (k = 0; k <= dimension - 16; k += 16) {
@@ -175,6 +219,7 @@ void matmult_opt4_transposed_simd(int8_t* A, int8_t* B, int32_t* C, int dimensio
             C[i * dimension + (j + 0)] = (int32_t)sum0; C[i * dimension + (j + 1)] = (int32_t)sum1;
             C[i * dimension + (j + 2)] = (int32_t)sum2; C[i * dimension + (j + 3)] = (int32_t)sum3;
         }
+        // remaining single columns
         for (; j < dimension; j++) {
             long long acc = 0; int k;
             for (k = 0; k <= dimension - 16; k += 16) {
@@ -188,10 +233,93 @@ void matmult_opt4_transposed_simd(int8_t* A, int8_t* B, int32_t* C, int dimensio
         }
     }
 #else
-    // NEON fallback: 4-column blocked implementation
+    // NEON fallback: 8-column blocked implementation
     for (int i = 0; i < dimension; i++) {
         int j;
-        for (j = 0; j <= dimension - 4; j += 4) {
+        for (j = 0; j <= dimension - 8; j += 8) {
+            int32x4_t acc0 = vdupq_n_s32(0), acc1 = vdupq_n_s32(0), acc2 = vdupq_n_s32(0), acc3 = vdupq_n_s32(0);
+            int32x4_t acc4 = vdupq_n_s32(0), acc5 = vdupq_n_s32(0), acc6 = vdupq_n_s32(0), acc7 = vdupq_n_s32(0);
+            int k = 0;
+            for (; k <= dimension - 16; k += 16) {
+                int8x16_t a_vec = vld1q_s8(A + i * dimension + k);
+                int16x8_t a_lo = vmovl_s8(vget_low_s8(a_vec)); int16x8_t a_hi = vmovl_s8(vget_high_s8(a_vec));
+                int32x4_t a0 = vmovl_s16(vget_low_s16(a_lo)); int32x4_t a1 = vmovl_s16(vget_high_s16(a_lo));
+                int32x4_t a2 = vmovl_s16(vget_low_s16(a_hi)); int32x4_t a3 = vmovl_s16(vget_high_s16(a_hi));
+
+                int8x16_t b0_vec = vld1q_s8(Bt + (j + 0) * dimension + k);
+                int8x16_t b1_vec = vld1q_s8(Bt + (j + 1) * dimension + k);
+                int8x16_t b2_vec = vld1q_s8(Bt + (j + 2) * dimension + k);
+                int8x16_t b3_vec = vld1q_s8(Bt + (j + 3) * dimension + k);
+                int8x16_t b4_vec = vld1q_s8(Bt + (j + 4) * dimension + k);
+                int8x16_t b5_vec = vld1q_s8(Bt + (j + 5) * dimension + k);
+                int8x16_t b6_vec = vld1q_s8(Bt + (j + 6) * dimension + k);
+                int8x16_t b7_vec = vld1q_s8(Bt + (j + 7) * dimension + k);
+
+                int16x8_t b0_lo = vmovl_s8(vget_low_s8(b0_vec)); int16x8_t b0_hi = vmovl_s8(vget_high_s8(b0_vec));
+                int16x8_t b1_lo = vmovl_s8(vget_low_s8(b1_vec)); int16x8_t b1_hi = vmovl_s8(vget_high_s8(b1_vec));
+                int16x8_t b2_lo = vmovl_s8(vget_low_s8(b2_vec)); int16x8_t b2_hi = vmovl_s8(vget_high_s8(b2_vec));
+                int16x8_t b3_lo = vmovl_s8(vget_low_s8(b3_vec)); int16x8_t b3_hi = vmovl_s8(vget_high_s8(b3_vec));
+                int16x8_t b4_lo = vmovl_s8(vget_low_s8(b4_vec)); int16x8_t b4_hi = vmovl_s8(vget_high_s8(b4_vec));
+                int16x8_t b5_lo = vmovl_s8(vget_low_s8(b5_vec)); int16x8_t b5_hi = vmovl_s8(vget_high_s8(b5_vec));
+                int16x8_t b6_lo = vmovl_s8(vget_low_s8(b6_vec)); int16x8_t b6_hi = vmovl_s8(vget_high_s8(b6_vec));
+                int16x8_t b7_lo = vmovl_s8(vget_low_s8(b7_vec)); int16x8_t b7_hi = vmovl_s8(vget_high_s8(b7_vec));
+
+                int32x4_t b0_0 = vmovl_s16(vget_low_s16(b0_lo)); int32x4_t b0_1 = vmovl_s16(vget_high_s16(b0_lo));
+                int32x4_t b0_2 = vmovl_s16(vget_low_s16(b0_hi)); int32x4_t b0_3 = vmovl_s16(vget_high_s16(b0_hi));
+                int32x4_t b1_0 = vmovl_s16(vget_low_s16(b1_lo)); int32x4_t b1_1 = vmovl_s16(vget_high_s16(b1_lo));
+                int32x4_t b1_2 = vmovl_s16(vget_low_s16(b1_hi)); int32x4_t b1_3 = vmovl_s16(vget_high_s16(b1_hi));
+                int32x4_t b2_0 = vmovl_s16(vget_low_s16(b2_lo)); int32x4_t b2_1 = vmovl_s16(vget_high_s16(b2_lo));
+                int32x4_t b2_2 = vmovl_s16(vget_low_s16(b2_hi)); int32x4_t b2_3 = vmovl_s16(vget_high_s16(b2_hi));
+                int32x4_t b3_0 = vmovl_s16(vget_low_s16(b3_lo)); int32x4_t b3_1 = vmovl_s16(vget_high_s16(b3_lo));
+                int32x4_t b3_2 = vmovl_s16(vget_low_s16(b3_hi)); int32x4_t b3_3 = vmovl_s16(vget_high_s16(b3_hi));
+                int32x4_t b4_0 = vmovl_s16(vget_low_s16(b4_lo)); int32x4_t b4_1 = vmovl_s16(vget_high_s16(b4_lo));
+                int32x4_t b4_2 = vmovl_s16(vget_low_s16(b4_hi)); int32x4_t b4_3 = vmovl_s16(vget_high_s16(b4_hi));
+                int32x4_t b5_0 = vmovl_s16(vget_low_s16(b5_lo)); int32x4_t b5_1 = vmovl_s16(vget_high_s16(b5_lo));
+                int32x4_t b5_2 = vmovl_s16(vget_low_s16(b5_hi)); int32x4_t b5_3 = vmovl_s16(vget_high_s16(b5_hi));
+                int32x4_t b6_0 = vmovl_s16(vget_low_s16(b6_lo)); int32x4_t b6_1 = vmovl_s16(vget_high_s16(b6_lo));
+                int32x4_t b6_2 = vmovl_s16(vget_low_s16(b6_hi)); int32x4_t b6_3 = vmovl_s16(vget_high_s16(b6_hi));
+                int32x4_t b7_0 = vmovl_s16(vget_low_s16(b7_lo)); int32x4_t b7_1 = vmovl_s16(vget_high_s16(b7_lo));
+                int32x4_t b7_2 = vmovl_s16(vget_low_s16(b7_hi)); int32x4_t b7_3 = vmovl_s16(vget_high_s16(b7_hi));
+
+                acc0 = vaddq_s32(acc0, vmulq_s32(a0, b0_0)); acc0 = vaddq_s32(acc0, vmulq_s32(a1, b0_1));
+                acc0 = vaddq_s32(acc0, vmulq_s32(a2, b0_2)); acc0 = vaddq_s32(acc0, vmulq_s32(a3, b0_3));
+                acc1 = vaddq_s32(acc1, vmulq_s32(a0, b1_0)); acc1 = vaddq_s32(acc1, vmulq_s32(a1, b1_1));
+                acc1 = vaddq_s32(acc1, vmulq_s32(a2, b1_2)); acc1 = vaddq_s32(acc1, vmulq_s32(a3, b1_3));
+                acc2 = vaddq_s32(acc2, vmulq_s32(a0, b2_0)); acc2 = vaddq_s32(acc2, vmulq_s32(a1, b2_1));
+                acc2 = vaddq_s32(acc2, vmulq_s32(a2, b2_2)); acc2 = vaddq_s32(acc2, vmulq_s32(a3, b2_3));
+                acc3 = vaddq_s32(acc3, vmulq_s32(a0, b3_0)); acc3 = vaddq_s32(acc3, vmulq_s32(a1, b3_1));
+                acc3 = vaddq_s32(acc3, vmulq_s32(a2, b3_2)); acc3 = vaddq_s32(acc3, vmulq_s32(a3, b3_3));
+                acc4 = vaddq_s32(acc4, vmulq_s32(a0, b4_0)); acc4 = vaddq_s32(acc4, vmulq_s32(a1, b4_1));
+                acc4 = vaddq_s32(acc4, vmulq_s32(a2, b4_2)); acc4 = vaddq_s32(acc4, vmulq_s32(a3, b4_3));
+                acc5 = vaddq_s32(acc5, vmulq_s32(a0, b5_0)); acc5 = vaddq_s32(acc5, vmulq_s32(a1, b5_1));
+                acc5 = vaddq_s32(acc5, vmulq_s32(a2, b5_2)); acc5 = vaddq_s32(acc5, vmulq_s32(a3, b5_3));
+                acc6 = vaddq_s32(acc6, vmulq_s32(a0, b6_0)); acc6 = vaddq_s32(acc6, vmulq_s32(a1, b6_1));
+                acc6 = vaddq_s32(acc6, vmulq_s32(a2, b6_2)); acc6 = vaddq_s32(acc6, vmulq_s32(a3, b6_3));
+                acc7 = vaddq_s32(acc7, vmulq_s32(a0, b7_0)); acc7 = vaddq_s32(acc7, vmulq_s32(a1, b7_1));
+                acc7 = vaddq_s32(acc7, vmulq_s32(a2, b7_2)); acc7 = vaddq_s32(acc7, vmulq_s32(a3, b7_3));
+            }
+            int64_t sum0 = (int64_t)vaddvq_s32(acc0); int64_t sum1 = (int64_t)vaddvq_s32(acc1);
+            int64_t sum2 = (int64_t)vaddvq_s32(acc2); int64_t sum3 = (int64_t)vaddvq_s32(acc3);
+            int64_t sum4 = (int64_t)vaddvq_s32(acc4); int64_t sum5 = (int64_t)vaddvq_s32(acc5);
+            int64_t sum6 = (int64_t)vaddvq_s32(acc6); int64_t sum7 = (int64_t)vaddvq_s32(acc7);
+            for (; k < dimension; k++) {
+                int32_t a = (int32_t)A[i * dimension + k];
+                sum0 += a * (int32_t)Bt[(j + 0) * dimension + k];
+                sum1 += a * (int32_t)Bt[(j + 1) * dimension + k];
+                sum2 += a * (int32_t)Bt[(j + 2) * dimension + k];
+                sum3 += a * (int32_t)Bt[(j + 3) * dimension + k];
+                sum4 += a * (int32_t)Bt[(j + 4) * dimension + k];
+                sum5 += a * (int32_t)Bt[(j + 5) * dimension + k];
+                sum6 += a * (int32_t)Bt[(j + 6) * dimension + k];
+                sum7 += a * (int32_t)Bt[(j + 7) * dimension + k];
+            }
+            C[i * dimension + (j + 0)] = (int32_t)sum0; C[i * dimension + (j + 1)] = (int32_t)sum1;
+            C[i * dimension + (j + 2)] = (int32_t)sum2; C[i * dimension + (j + 3)] = (int32_t)sum3;
+            C[i * dimension + (j + 4)] = (int32_t)sum4; C[i * dimension + (j + 5)] = (int32_t)sum5;
+            C[i * dimension + (j + 6)] = (int32_t)sum6; C[i * dimension + (j + 7)] = (int32_t)sum7;
+        }
+        // handle remaining 4-column blocks
+        for (j = (j <= dimension - 4) ? j : j; j <= dimension - 4; j += 4) {
             int32x4_t acc0 = vdupq_n_s32(0), acc1 = vdupq_n_s32(0), acc2 = vdupq_n_s32(0), acc3 = vdupq_n_s32(0);
             int k = 0;
             for (; k <= dimension - 16; k += 16) {
