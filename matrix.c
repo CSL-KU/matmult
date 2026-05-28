@@ -276,7 +276,6 @@ void matmult_opt4_transposed_simd(int8_t* A, int8_t* B, int32_t* C, int dimensio
                 int32x4_t b2 = vmovl_s16(vget_low_s16(b_hi));
                 int32x4_t b3 = vmovl_s16(vget_high_s16(b_hi));
 
-                acc += vgetq_lane_s32(vmulq_s32(a0, b0), 0);
                 int32x4_t m0 = vmulq_s32(a0, b0);
                 int32x4_t m1 = vmulq_s32(a1, b1);
                 int32x4_t m2 = vmulq_s32(a2, b2);
@@ -395,6 +394,33 @@ int main(int argc, char *argv[])
     memset(C, 0, alloc_size32);
     
     // do matrix multiplication
+    // diagnostic mode: compare opt3 vs opt4
+    if (algo == 100) {
+        int32_t *D = (int32_t*)aligned_alloc(32, alloc_size32);
+        if (!D) {
+            fprintf(stderr, "Failed to allocate D\n");
+            exit(EXIT_FAILURE);
+        }
+        init_data(A, B, C, dimension);
+        matmult_opt3_transposed(A, B, C, dimension);
+        memcpy(D, C, alloc_size32);
+        memset(C, 0, alloc_size32);
+        init_data(A, B, C, dimension); // re-init to ensure same inputs
+        matmult_opt4_transposed_simd(A, B, C, dimension);
+        int diffs = 0;
+        for (int idx = 0; idx < dimension*dimension; idx++) {
+            if (C[idx] != D[idx]) {
+                if (diffs < 10) {
+                    printf("diff idx %d: opt3=%d opt4=%d\n", idx, D[idx], C[idx]);
+                }
+                diffs++;
+            }
+        }
+        printf("diff count: %d\n", diffs);
+        free(D);
+        free(A); free(B); free(C);
+        return 0;
+    }
 
     switch(algo) {
     case 0:
