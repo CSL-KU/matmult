@@ -12,6 +12,9 @@
 #include <stdint.h>
 #include <limits.h>
 #include <sys/time.h>
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 
 struct timeval tv;
 int dimension = 1024;
@@ -50,8 +53,148 @@ long long print_checksum(int32_t *C, int dimention)
 }
 
 #define BENCH(func) \
-    init_data(A, B, C, dimension); \
-    { double t0 = timestamp(); func; double t1 = timestamp(); printf("%.12s  %.6f  chsum: %lld\n", #func, t1-t0, print_checksum(C, dimension)); }
+    init_data(A_i8, B_i8, C_i32, dimension); \
+    { double t0 = timestamp(); func; double t1 = timestamp(); printf("%.12s  %.6f  chsum: %lld\n", #func, t1-t0, print_checksum(C_i32, dimension)); }
+
+/* FP32 support */
+void init_data_fp32(float *A, float *B, float *C, int dimension)
+{
+    srand(292);
+    for (int i = 0; i < dimension; i++)
+        for (int j = 0; j < dimension; j++) {
+            A[dimension*i+j] = (float)((rand() % 101) - 50);
+            B[dimension*i+j] = (float)((rand() % 101) - 50);
+            C[dimension*i+j] = 0.0f;
+        }
+}
+
+double print_checksum_fp32(float *C, int dimention)
+{
+    double sum = 0.0;
+    for (int i = 0; i < dimention; i++)
+        for (int j = 0; j < dimention; j++)
+            sum += (double)C[i*dimention+j];
+    return sum;
+}
+
+#define BENCH_FP32(func) \
+    init_data_fp32(A_f, B_f, C_f, dimension); \
+    { double t0 = timestamp(); func; double t1 = timestamp(); printf("%.12s  %.6f  chsum: %.6f\n", #func, t1-t0, print_checksum_fp32(C_f, dimension)); }
+
+void matmult_opt0_naive_fp32(float *A, float *B, float *C, int dimension)
+{
+    for (int i = 0; i < dimension; i++)
+        for (int j = 0; j < dimension; j++)
+            for (int k = 0; k < dimension; k++)
+                C[dimension*i+j] += A[dimension*i+k] * B[dimension*k+j];
+}
+
+void matmult_opt1_jk_fp32(float *A, float *B, float *C, int dimension)
+{
+    for (int i = 0; i < dimension; i++)
+        for (int k = 0; k < dimension; k++)
+            for (int j = 0; j < dimension; j++)
+                C[dimension*i+j] += A[dimension*i+k] * B[dimension*k+j];
+}
+
+void matmult_opt2_jk_tiling_fp32(float *A, float *B, float *C, int dimension)
+{
+    int bs = 256;
+    for (int i = 0; i < dimension; i += bs) {
+        int i_end = (i + bs < dimension) ? i + bs : dimension;
+        for (int k = 0; k < dimension; k += bs) {
+            int k_end = (k + bs < dimension) ? k + bs : dimension;
+            for (int j = 0; j < dimension; j += bs) {
+                int j_end = (j + bs < dimension) ? j + bs : dimension;
+                for (int ii = i; ii < i_end; ii++)
+                    for (int kk = k; kk < k_end; kk++)
+                        for (int jj = j; jj < j_end; jj++)
+                            C[dimension*ii+jj] += A[dimension*ii+kk] * B[dimension*kk+jj];
+            }
+        }
+    }
+}
+
+void matmult_opt3_transposed_fp32(float *A, float *B, float *C, int dimension)
+{
+    size_t alloc_size;
+    if (calc_matrix_bytes_with_size(dimension, sizeof(float), &alloc_size) != 0) { fprintf(stderr, "Invalid dimension for allocation\n"); return; }
+    float *Bt = (float*)malloc(alloc_size);
+    if (!Bt) { fprintf(stderr, "Failed to allocate memory\n"); return; }
+    for (int i = 0; i < dimension; i++)
+        for (int j = 0; j < dimension; j++)
+            Bt[i*dimension+j] = B[j*dimension+i];
+    for (int i = 0; i < dimension; i++)
+        for (int j = 0; j < dimension; j++) {
+            double acc = 0.0;
+            for (int k = 0; k < dimension; k++) acc += (double)A[i*dimension+k] * (double)Bt[j*dimension+k];
+            C[i*dimension+j] = (float)acc;
+        }
+    free(Bt);
+}
+
+void matmult_opt4_transposed_simd_fp32(float *A, float *B, float *C, int dimension)
+{
+    size_t alloc_size; if (calc_matrix_bytes_with_size(dimension, sizeof(float), &alloc_size) != 0) { fprintf(stderr, "Invalid dimension for allocation\n"); return; }
+#if defined(__AVX2__)
+    float *Bt = (float*)aligned_alloc(32, alloc_size); if (!Bt) { fprintf(stderr, "Failed to allocate aligned memory\n"); return; }
+    for (int i = 0; i < dimension; i++) for (int j = 0; j < dimension; j++) Bt[i*dimension + j] = B[j*dimension + i];
+    for (int i = 0; i < dimension; i++) {
+        for (int j = 0; j < dimension; j++) {
+            __m256 acc = _mm256_setzero_ps();
+            int k;
+            for (k = 0; k <= dimension - 8; k += 8) {
+                __m256 a = _mm256_loadu_ps(A + i * dimension + k);
+                __m256 b = _mm256_loadu_ps(Bt + j * dimension + k);
+                acc = _mm256_add_ps(acc, _mm256_mul_ps(a, b));
+            }
+            float tmp[8]; _mm256_storeu_ps(tmp, acc); float sum = 0.0f; for (int t = 0; t < 8; t++) sum += tmp[t];
+            for (; k < dimension; k++) sum += A[i * dimension + k] * Bt[j * dimension + k];
+            C[i * dimension + j] = sum;
+        }
+    }
+    free(Bt);
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+    /* NEON FP32 implementation */
+    float *Bt = (float*)malloc(alloc_size); if (!Bt) { fprintf(stderr, "Failed to allocate memory\n"); return; }
+    for (int i = 0; i < dimension; i++) for (int j = 0; j < dimension; j++) Bt[i*dimension + j] = B[j*dimension + i];
+    for (int i = 0; i < dimension; i++) {
+        for (int j = 0; j < dimension; j++) {
+            float32x4_t acc0 = vdupq_n_f32(0.0f);
+            float32x4_t acc1 = vdupq_n_f32(0.0f);
+            int k = 0;
+            for (; k <= dimension - 8; k += 8) {
+                float32x4_t a0 = vld1q_f32(A + i * dimension + k);
+                float32x4_t a1 = vld1q_f32(A + i * dimension + k + 4);
+                float32x4_t b0 = vld1q_f32(Bt + j * dimension + k);
+                float32x4_t b1 = vld1q_f32(Bt + j * dimension + k + 4);
+                acc0 = vmlaq_f32(acc0, a0, b0);
+                acc1 = vmlaq_f32(acc1, a1, b1);
+            }
+            for (; k <= dimension - 4; k += 4) {
+                float32x4_t a0 = vld1q_f32(A + i * dimension + k);
+                float32x4_t b0 = vld1q_f32(Bt + j * dimension + k);
+                acc0 = vmlaq_f32(acc0, a0, b0);
+            }
+            float sum = vaddvq_f32(acc0) + vaddvq_f32(acc1);
+            for (; k < dimension; k++) sum += A[i * dimension + k] * Bt[j * dimension + k];
+            C[i * dimension + j] = sum;
+        }
+    }
+    free(Bt);
+#else
+    /* Non-AVX2 fallback: scalar transposed multiply */
+    float *Bt = (float*)malloc(alloc_size); if (!Bt) { fprintf(stderr, "Failed to allocate memory\n"); return; }
+    for (int i = 0; i < dimension; i++) for (int j = 0; j < dimension; j++) Bt[i*dimension + j] = B[j*dimension + i];
+    for (int i = 0; i < dimension; i++)
+        for (int j = 0; j < dimension; j++) {
+            double acc = 0.0;
+            for (int k = 0; k < dimension; k++) acc += (double)A[i * dimension + k] * (double)Bt[j * dimension + k];
+            C[i * dimension + j] = (float)acc;
+        }
+    free(Bt);
+#endif
+}
 
 void transpose_naive(int8_t *src, int8_t *dst, int src_row, int src_col)
 {
@@ -403,47 +546,99 @@ void matmult_opt4_transposed_simd(int8_t* A, int8_t* B, int32_t* C, int dimensio
 
 int main(int argc, char *argv[])
 {
-    int8_t *A, *B; int32_t *C;
-    int opt; int algo = 99;
-    while ((opt = getopt(argc, argv, "m:n:a:h")) != -1) {
+    int8_t *A_i8 = NULL, *B_i8 = NULL; int32_t *C_i32 = NULL;
+    float *A_f = NULL, *B_f = NULL, *C_f = NULL;
+    int opt; int algo = 99; int dtype = 0; /* 0=int8,1=fp32 */
+    while ((opt = getopt(argc, argv, "t:n:a:h")) != -1) {
         switch (opt) {
+        case 't': {
+            if (!optarg) break;
+            if (strcmp(optarg, "fp32") == 0 || strcmp(optarg, "float") == 0 || strcmp(optarg, "f") == 0) dtype = 1;
+            else dtype = 0;
+            break; }
         case 'n': { long parsed = strtol(optarg, NULL, 0); if (parsed <= 0 || parsed > INT_MAX) { fprintf(stderr, "Invalid dimension: %s\n", optarg); return EXIT_FAILURE; } dimension = (int)parsed; break; }
         case 'a': algo = strtol(optarg, NULL, 0); break;
-        default: printf("Usage: %s [-n dimension] [-a algorithm]\n", argv[0]); exit(EXIT_SUCCESS);
+        default: printf("Usage: %s [-t {int8|fp32}] [-n dimension] [-a algorithm]\n", argv[0]); exit(EXIT_SUCCESS);
         }
     }
-    size_t alloc_size8, alloc_size32;
-    if (calc_matrix_bytes_with_size(dimension, sizeof(int8_t), &alloc_size8) != 0) { fprintf(stderr, "Invalid dimension for allocation\n"); return EXIT_FAILURE; }
-    if (calc_matrix_bytes_with_size(dimension, sizeof(int32_t), &alloc_size32) != 0) { fprintf(stderr, "Invalid dimension for allocation\n"); return EXIT_FAILURE; }
-    A = (int8_t*)aligned_alloc(32, alloc_size8); B = (int8_t*)aligned_alloc(32, alloc_size8); C = (int32_t*)aligned_alloc(32, alloc_size32);
-    if (!A || !B || !C) { fprintf(stderr, "Failed to allocate aligned memory for matrices\n"); exit(EXIT_FAILURE); }
-    memset(A, 0, alloc_size8); memset(B, 0, alloc_size8); memset(C, 0, alloc_size32);
-
-    if (algo == 100) {
-        int32_t *D = (int32_t*)aligned_alloc(32, alloc_size32); if (!D) { fprintf(stderr, "Failed to allocate D\n"); exit(EXIT_FAILURE); }
-        init_data(A, B, C, dimension); matmult_opt3_transposed(A, B, C, dimension); memcpy(D, C, alloc_size32); memset(C, 0, alloc_size32);
-        init_data(A, B, C, dimension); matmult_opt4_transposed_simd(A, B, C, dimension);
-        int diffs = 0; for (int idx = 0; idx < dimension*dimension; idx++) { if (C[idx] != D[idx]) { if (diffs < 10) printf("diff idx %d: opt3=%d opt4=%d\n", idx, D[idx], C[idx]); diffs++; } }
-        printf("diff count: %d\n", diffs); free(D); free(A); free(B); free(C); return 0;
+    if (dtype == 0) {
+        size_t alloc_size8, alloc_size32;
+        printf("Allocating int8 matrices of dimension %d and result matrix of int32\n", dimension);
+        if (calc_matrix_bytes_with_size(dimension, sizeof(int8_t), &alloc_size8) != 0) { fprintf(stderr, "Invalid dimension for allocation\n"); return EXIT_FAILURE; }
+        if (calc_matrix_bytes_with_size(dimension, sizeof(int32_t), &alloc_size32) != 0) { fprintf(stderr, "Invalid dimension for allocation\n"); return EXIT_FAILURE; }
+        A_i8 = (int8_t*)aligned_alloc(32, alloc_size8); B_i8 = (int8_t*)aligned_alloc(32, alloc_size8); C_i32 = (int32_t*)aligned_alloc(32, alloc_size32);
+        if (!A_i8 || !B_i8 || !C_i32) { fprintf(stderr, "Failed to allocate aligned memory for int8 matrices\n"); exit(EXIT_FAILURE); }
+        memset(A_i8, 0, alloc_size8); memset(B_i8, 0, alloc_size8); memset(C_i32, 0, alloc_size32);
+    } else {
+        size_t alloc_sizef;
+        printf("Allocating fp32 matrices of dimension %d and result matrix of fp32\n", dimension);
+        if (calc_matrix_bytes_with_size(dimension, sizeof(float), &alloc_sizef) != 0) { fprintf(stderr, "Invalid dimension for allocation\n"); return EXIT_FAILURE; }
+        A_f = (float*)aligned_alloc(32, alloc_sizef); B_f = (float*)aligned_alloc(32, alloc_sizef); C_f = (float*)aligned_alloc(32, alloc_sizef);
+        if (!A_f || !B_f || !C_f) { fprintf(stderr, "Failed to allocate aligned memory for fp32 matrices\n"); exit(EXIT_FAILURE); }
+        memset(A_f, 0, alloc_sizef); memset(B_f, 0, alloc_sizef); memset(C_f, 0, alloc_sizef);
     }
 
+    if (algo == 100) {
+        if (dtype == 0) {
+            size_t alloc_size32; calc_matrix_bytes_with_size(dimension, sizeof(int32_t), &alloc_size32);
+            int32_t *D = (int32_t*)aligned_alloc(32, alloc_size32); if (!D) { fprintf(stderr, "Failed to allocate D\n"); exit(EXIT_FAILURE); }
+            init_data(A_i8, B_i8, C_i32, dimension); matmult_opt3_transposed(A_i8, B_i8, C_i32, dimension); memcpy(D, C_i32, alloc_size32); memset(C_i32, 0, alloc_size32);
+            init_data(A_i8, B_i8, C_i32, dimension); matmult_opt4_transposed_simd(A_i8, B_i8, C_i32, dimension);
+            int diffs = 0; for (int idx = 0; idx < dimension*dimension; idx++) { if (C_i32[idx] != D[idx]) { if (diffs < 10) printf("diff idx %d: opt3=%d opt4=%d\n", idx, D[idx], C_i32[idx]); diffs++; } }
+            printf("diff count: %d\n", diffs); free(D); free(A_i8); free(B_i8); free(C_i32); return 0;
+        } else {
+            size_t alloc_sizef; calc_matrix_bytes_with_size(dimension, sizeof(float), &alloc_sizef);
+            float *D = (float*)aligned_alloc(32, alloc_sizef); if (!D) { fprintf(stderr, "Failed to allocate D\n"); exit(EXIT_FAILURE); }
+            init_data_fp32(A_f, B_f, C_f, dimension); matmult_opt3_transposed_fp32(A_f, B_f, C_f, dimension); memcpy(D, C_f, alloc_sizef); memset(C_f, 0, alloc_sizef);
+            init_data_fp32(A_f, B_f, C_f, dimension); matmult_opt4_transposed_simd_fp32(A_f, B_f, C_f, dimension);
+            int diffs = 0; for (int idx = 0; idx < dimension*dimension; idx++) { if (C_f[idx] != D[idx]) { if (diffs < 10) printf("diff idx %d: opt3=%f opt4=%f\n", idx, D[idx], C_f[idx]); diffs++; } }
+            printf("diff count: %d\n", diffs); free(D); free(A_f); free(B_f); free(C_f); return 0;
+        }
+    }
     switch(algo) {
-    case 0: BENCH(matmult_opt0_naive(A, B, C, dimension)); break;
-    case 1: BENCH(matmult_opt1_jk(A, B, C, dimension)); break;
-    case 2: BENCH(matmult_opt2_jk_tiling(A, B, C, dimension)); break;
-    case 3: BENCH(matmult_opt3_transposed(A, B, C, dimension)); break;
-    case 4: BENCH(matmult_opt4_transposed_simd(A, B, C, dimension)); break;
-    case 99: 
-        BENCH(matmult_opt0_naive(A, B, C, dimension));
-        BENCH(matmult_opt1_jk(A, B, C, dimension));
-        BENCH(matmult_opt2_jk_tiling(A, B, C, dimension));
-        BENCH(matmult_opt3_transposed(A, B, C, dimension));
-        BENCH(matmult_opt4_transposed_simd(A, B, C, dimension));
+    case 0:
+        if (dtype == 0) { BENCH(matmult_opt0_naive(A_i8, B_i8, C_i32, dimension)); }
+        else { BENCH_FP32(matmult_opt0_naive_fp32(A_f, B_f, C_f, dimension)); }
         break;
-    default: 
+    case 1:
+        if (dtype == 0) { BENCH(matmult_opt1_jk(A_i8, B_i8, C_i32, dimension)); }
+        else { BENCH_FP32(matmult_opt1_jk_fp32(A_f, B_f, C_f, dimension)); }
+        break;
+    case 2:
+        if (dtype == 0) { BENCH(matmult_opt2_jk_tiling(A_i8, B_i8, C_i32, dimension)); }
+        else { BENCH_FP32(matmult_opt2_jk_tiling_fp32(A_f, B_f, C_f, dimension)); }
+        break;
+    case 3:
+        if (dtype == 0) { BENCH(matmult_opt3_transposed(A_i8, B_i8, C_i32, dimension)); }
+        else { BENCH_FP32(matmult_opt3_transposed_fp32(A_f, B_f, C_f, dimension)); }
+        break;
+    case 4:
+        if (dtype == 0) { BENCH(matmult_opt4_transposed_simd(A_i8, B_i8, C_i32, dimension)); }
+        else { BENCH_FP32(matmult_opt4_transposed_simd_fp32(A_f, B_f, C_f, dimension)); }
+        break;
+    case 99:
+        if (dtype == 0) {
+            BENCH(matmult_opt0_naive(A_i8, B_i8, C_i32, dimension));
+            BENCH(matmult_opt1_jk(A_i8, B_i8, C_i32, dimension));
+            BENCH(matmult_opt2_jk_tiling(A_i8, B_i8, C_i32, dimension));
+            BENCH(matmult_opt3_transposed(A_i8, B_i8, C_i32, dimension));
+            BENCH(matmult_opt4_transposed_simd(A_i8, B_i8, C_i32, dimension));
+        } else {
+            BENCH_FP32(matmult_opt0_naive_fp32(A_f, B_f, C_f, dimension));
+            BENCH_FP32(matmult_opt1_jk_fp32(A_f, B_f, C_f, dimension));
+            BENCH_FP32(matmult_opt2_jk_tiling_fp32(A_f, B_f, C_f, dimension));
+            BENCH_FP32(matmult_opt3_transposed_fp32(A_f, B_f, C_f, dimension));
+            BENCH_FP32(matmult_opt4_transposed_simd_fp32(A_f, B_f, C_f, dimension));
+        }
+        break;
+    default:
         printf("Unknown algorithm: %d\n", algo); exit(EXIT_FAILURE);
     }
 
-    free(A); free(B); free(C);
+    if (dtype == 0) {
+        free(A_i8); free(B_i8); free(C_i32);
+    } else {
+        free(A_f); free(B_f); free(C_f);
+    }
     return 0;
 }
