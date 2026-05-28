@@ -179,7 +179,9 @@ void matmult_opt3_transposed(int8_t *A, int8_t *B, int32_t *C, int dimension)
 
 
 
-// Integer transposed multiplication (portable fallback for int8 inputs)
+// Optimized integer transposed multiplication for int8 inputs.
+#ifdef __AVX2__
+#include <immintrin.h>
 void matmult_opt4_transposed_simd(int8_t* A, int8_t* B, int32_t* C, int dimension) {
     size_t alloc_size;
     if (calc_matrix_bytes_with_size(dimension, sizeof(int8_t), &alloc_size) != 0) {
@@ -195,6 +197,120 @@ void matmult_opt4_transposed_simd(int8_t* A, int8_t* B, int32_t* C, int dimensio
 
     for (int i = 0; i < dimension; i++) {
         for (int j = 0; j < dimension; j++) {
+            __m256i acc_lo = _mm256_setzero_si256();
+            __m256i acc_hi = _mm256_setzero_si256();
+            int k;
+            for (k = 0; k <= dimension - 16; k += 16) {
+                __m128i a128 = _mm_loadu_si128((const __m128i*)(A + i * dimension + k));
+                __m128i b128 = _mm_loadu_si128((const __m128i*)(Bt + j * dimension + k));
+                __m256i a16 = _mm256_cvtepi8_epi16(a128); // 16 x int16
+                __m256i b16 = _mm256_cvtepi8_epi16(b128);
+
+                __m128i a16_lo = _mm256_castsi256_si128(a16);
+                __m128i a16_hi = _mm256_extracti128_si256(a16, 1);
+                __m128i b16_lo = _mm256_castsi256_si128(b16);
+                __m128i b16_hi = _mm256_extracti128_si256(b16, 1);
+
+                __m256i a32_lo = _mm256_cvtepi16_epi32(a16_lo); // 8 x int32
+                __m256i a32_hi = _mm256_cvtepi16_epi32(a16_hi);
+                __m256i b32_lo = _mm256_cvtepi16_epi32(b16_lo);
+                __m256i b32_hi = _mm256_cvtepi16_epi32(b16_hi);
+
+                __m256i mul_lo = _mm256_mullo_epi32(a32_lo, b32_lo);
+                __m256i mul_hi = _mm256_mullo_epi32(a32_hi, b32_hi);
+
+                acc_lo = _mm256_add_epi32(acc_lo, mul_lo);
+                acc_hi = _mm256_add_epi32(acc_hi, mul_hi);
+            }
+
+            long long sum = 0;
+            int32_t tmp[8];
+            _mm256_storeu_si256((__m256i*)tmp, acc_lo);
+            for (int t = 0; t < 8; t++) sum += tmp[t];
+            _mm256_storeu_si256((__m256i*)tmp, acc_hi);
+            for (int t = 0; t < 8; t++) sum += tmp[t];
+
+            for (; k < dimension; k++) {
+                sum += (int32_t)A[i * dimension + k] * (int32_t)Bt[j * dimension + k];
+            }
+            C[i * dimension + j] = (int32_t)sum;
+        }
+    }
+    free(Bt);
+}
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+void matmult_opt4_transposed_simd(int8_t* A, int8_t* B, int32_t* C, int dimension) {
+    size_t alloc_size;
+    if (calc_matrix_bytes_with_size(dimension, sizeof(int8_t), &alloc_size) != 0) {
+        fprintf(stderr, "Invalid dimension for allocation\n");
+        return;
+    }
+    int8_t *Bt = (int8_t*)malloc(alloc_size);
+    if (!Bt) {
+        fprintf(stderr, "Failed to allocate memory\n");
+        return;
+    }
+    transpose_naive(B, Bt, dimension, dimension);
+
+    for (int i = 0; i < dimension; i++) {
+        for (int j = 0; j < dimension; j++) {
+            int64_t acc = 0;
+            int k = 0;
+            for (; k <= dimension - 16; k += 16) {
+                int8x16_t a_vec = vld1q_s8(A + i * dimension + k);
+                int8x16_t b_vec = vld1q_s8(Bt + j * dimension + k);
+
+                int16x8_t a_lo = vmovl_s8(vget_low_s8(a_vec));
+                int16x8_t a_hi = vmovl_s8(vget_high_s8(a_vec));
+                int16x8_t b_lo = vmovl_s8(vget_low_s8(b_vec));
+                int16x8_t b_hi = vmovl_s8(vget_high_s8(b_vec));
+
+                int32x4_t a0 = vmovl_s16(vget_low_s16(a_lo));
+                int32x4_t a1 = vmovl_s16(vget_high_s16(a_lo));
+                int32x4_t a2 = vmovl_s16(vget_low_s16(a_hi));
+                int32x4_t a3 = vmovl_s16(vget_high_s16(a_hi));
+
+                int32x4_t b0 = vmovl_s16(vget_low_s16(b_lo));
+                int32x4_t b1 = vmovl_s16(vget_high_s16(b_lo));
+                int32x4_t b2 = vmovl_s16(vget_low_s16(b_hi));
+                int32x4_t b3 = vmovl_s16(vget_high_s16(b_hi));
+
+                acc += vgetq_lane_s32(vmulq_s32(a0, b0), 0);
+                int32x4_t m0 = vmulq_s32(a0, b0);
+                int32x4_t m1 = vmulq_s32(a1, b1);
+                int32x4_t m2 = vmulq_s32(a2, b2);
+                int32x4_t m3 = vmulq_s32(a3, b3);
+                acc += (long long)vaddvq_s32(m0);
+                acc += (long long)vaddvq_s32(m1);
+                acc += (long long)vaddvq_s32(m2);
+                acc += (long long)vaddvq_s32(m3);
+            }
+            for (; k < dimension; k++) {
+                acc += (int32_t)A[i * dimension + k] * (int32_t)Bt[j * dimension + k];
+            }
+            C[i * dimension + j] = (int32_t)acc;
+        }
+    }
+    free(Bt);
+}
+#else
+// Scalar fallback
+void matmult_opt4_transposed_simd(int8_t* A, int8_t* B, int32_t* C, int dimension) {
+    size_t alloc_size;
+    if (calc_matrix_bytes_with_size(dimension, sizeof(int8_t), &alloc_size) != 0) {
+        fprintf(stderr, "Invalid dimension for allocation\n");
+        return;
+    }
+    int8_t *Bt = (int8_t*)malloc(alloc_size);
+    if (!Bt) {
+        fprintf(stderr, "Failed to allocate memory\n");
+        return;
+    }
+    transpose_naive(B, Bt, dimension, dimension);
+
+    for (int i = 0; i < dimension; i++) {
+        for (int j = 0; j < dimension; j++) {
             long long acc = 0;
             for (int k = 0; k < dimension; k++) {
                 acc += (long long)A[i * dimension + k] * (long long)Bt[j * dimension + k];
@@ -204,6 +320,7 @@ void matmult_opt4_transposed_simd(int8_t* A, int8_t* B, int32_t* C, int dimensio
     }
     free(Bt);
 }
+#endif
 
 
 int main(int argc, char *argv[])
