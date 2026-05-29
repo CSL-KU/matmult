@@ -15,6 +15,10 @@
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
 #endif
+/* Include x86 SIMD intrinsics when available */
+#if defined(__AVX__) || defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 struct timeval tv;
 int dimension = 1024;
