@@ -91,7 +91,10 @@ double print_checksum(float *C, int dimention)
 
 
 // a naive matrix multiplication implementation. 
-void matmult_opt0_naive(float *A, float *B, float *C, int dimension)
+void matmult_opt0_naive(    const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    int dimension)
 {
     for(int i = 0; i < dimension; i++) {
         for(int j = 0; j < dimension; j++) {
@@ -103,7 +106,10 @@ void matmult_opt0_naive(float *A, float *B, float *C, int dimension)
 }
 
 // matrix multiplication with jk order switch
-void matmult_opt1_jk(float *A, float *B, float *C, int dimension)
+void matmult_opt1_jk(const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    int dimension)
 {
     for(int i = 0; i < dimension; i++) {
         for(int k = 0; k < dimension; k++) {
@@ -116,7 +122,10 @@ void matmult_opt1_jk(float *A, float *B, float *C, int dimension)
 
 // matrix multiplication with jk order switch and tiling
 // Handles tail tiles when dimension is not a multiple of block size.
-void matmult_opt2_jk_tiling(float *A, float *B, float *C, int dimension)
+void matmult_opt2_jk_tiling(const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    int dimension)
 {
     int i,j,k,ii,jj,kk;
     int bs = 256; // block size = 256*256*4 = 256KB
@@ -152,7 +161,10 @@ void transpose_naive(float *src, float *dst, int src_row, int src_col)
 }
 
 // matrix multiplicaiton after transposed
-void matmult_opt3_transposed(float *A, float *B, float *C, int dimension)
+void matmult_opt3_transposed(const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    int dimension)
 {
     int i,j,k;
     size_t alloc_size;
@@ -160,7 +172,7 @@ void matmult_opt3_transposed(float *A, float *B, float *C, int dimension)
         fprintf(stderr, "Invalid dimension for allocation\n");
         return;
     }
-    float *Bt = (float*)malloc(alloc_size);
+    float* __restrict__ Bt = (float*)malloc(alloc_size);
     if (!Bt) {
         fprintf(stderr, "Failed to allocate memory\n");
         return;
@@ -182,7 +194,10 @@ void matmult_opt3_transposed(float *A, float *B, float *C, int dimension)
 #ifdef __AVX2__
 #include <immintrin.h> // AVX2 Intrinsics
 // matrix multiplicaiton transposed with AVX2 SIMD
-void matmult_opt4_transposed_simd(float* A, float* B, float* C, int dimension) {
+void matmult_opt4_transposed_simd(const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    int dimension) {
 
     size_t alloc_size;
     if (calc_matrix_bytes(dimension, &alloc_size) != 0) {
@@ -232,7 +247,10 @@ void matmult_opt4_transposed_simd(float* A, float* B, float* C, int dimension) {
 #include <smmintrin.h> // SSE4.2 Intrinsics
 
 // matrix multiplicaiton transposed with SIMD
-void matmult_opt4_transposed_simd(float* A, float* B, float* C, int dimension) {
+void matmult_opt4_transposed_simd(const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    int dimension) {
 
     size_t alloc_size;
     if (calc_matrix_bytes(dimension, &alloc_size) != 0) {
@@ -273,7 +291,10 @@ void matmult_opt4_transposed_simd(float* A, float* B, float* C, int dimension) {
 #elif __ARM_NEON
 #include <arm_neon.h>
 // matrix multiplicaiton transposed with SIMD
-void matmult_opt4_transposed_simd(float* A, float* B, float* C, int dimension) {
+void matmult_opt4_transposed_simd(const float* __restrict__ A,
+    const float* __restrict__ B,
+    float* __restrict__ C,
+    int dimension) {
 
     size_t alloc_size;
     if (calc_matrix_bytes(dimension, &alloc_size) != 0) {
